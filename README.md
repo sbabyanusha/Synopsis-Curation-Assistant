@@ -40,9 +40,6 @@ $env:OPENAI_API_KEY="sk-..."
 ```bash
 streamlit run new_app.py
 ```
-
-The app will open in your browser at [http://localhost:8501](http://localhost:8501).
-
 ---
 
 ##  Deployment on Streamlit Cloud
