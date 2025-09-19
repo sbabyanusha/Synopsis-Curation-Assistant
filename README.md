@@ -38,7 +38,7 @@ $env:OPENAI_API_KEY="sk-..."
 
 ### 4. Run the app
 ```bash
-streamlit run new_app.py
+streamlit run curation_assistant.py
 ```
 ---
 
@@ -46,7 +46,7 @@ streamlit run new_app.py
 
 1. Push this repo to GitHub.
 2. Go to [Streamlit Cloud](https://share.streamlit.io).
-3. Connect your repo and select **`new_app.py`** as the app file.
+3. Connect your repo and select **`curation_assistant.py`** as the app file.
 4. Add your **OpenAI API key** as a **Secret** in Streamlit Cloud (`OPENAI_API_KEY`).
 5. Deploy — you’ll get a shareable public link like:
 
@@ -122,7 +122,6 @@ pip install -r requirements.txt
 ---
 
 ## 👨‍💻 Author
-Built by **Baby Anusha Satravada** · Bioinformatics Software Engineer  
-Memorial Sloan Kettering Cancer Center (MSK)
+Built by **Baby Anusha Satravada** 
 
 ---
