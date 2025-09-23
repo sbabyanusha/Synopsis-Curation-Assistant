@@ -13,23 +13,22 @@ Quickstart
 3) export OPENAI_API_KEY=sk-...
 4) streamlit run new_app.py
 
+"""
 Streamlit Curation Assistant Tool — Chroma (new client API)
-- Uses chromadb.PersistentClient(path=...)  (DuckDB+Parquet storage)
-- SQLite import check patched via pysqlite3-binary (optional, safe)
-- Summarize/Q&A strictly from uploaded files + gene-frequency tool
+- Uses chromadb.PersistentClient(path=...) with DuckDB+Parquet storage
+- SQLite import shim via pysqlite3-binary to avoid old-system sqlite issues
 """
 
 from __future__ import annotations
 
-# ---------- SQLite hotfix (before ANY other imports that might touch sqlite3) ----------
+# --- SQLite shim (must be before any import that could touch sqlite3) ---
 try:
     import sys
     __import__("pysqlite3")
     sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
-    # fine if not installed; requirements pin includes it
     pass
-# --------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 
 import io, os, re, tempfile
 from pathlib import Path
@@ -47,7 +46,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Chroma (new client API)
+# Chroma new client
 import chromadb
 
 # Loaders
@@ -56,20 +55,20 @@ import docx, mammoth
 
 # Optional deps
 try:
-    import pytesseract  # OCR
+    import pytesseract
     _HAS_TESS = True
 except Exception:
     _HAS_TESS = False
 
 try:
-    import textract  # legacy .doc
+    import textract
     _HAS_TEXTRACT = True
 except Exception:
     _HAS_TEXTRACT = False
 
-# =================================
-# CONFIG & CONSTANTS
-# =================================
+# ==============================
+# CONFIG
+# ==============================
 st.set_page_config(page_title="Synopsis + Gene Frequencies", page_icon="🧬", layout="wide")
 
 CHUNK_SIZE = 1200
@@ -83,9 +82,9 @@ COLLECTION_NAME = "curation_assistant"
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
 
-# =================================
+# ==============================
 # STYLES
-# =================================
+# ==============================
 st.markdown(
     """
 <style>
@@ -95,7 +94,6 @@ st.markdown(
   color: white; padding: 18px 20px; border-radius: 16px; margin-bottom: 16px;
   box-shadow: 0 6px 24px rgba(0,0,0,0.15);
 }
-.tag {background: rgba(255,255,255,0.18); padding: 2px 10px; border-radius: 999px; margin-left: 8px; font-size: 0.85rem;}
 .stExpander, .stTabs [data-baseweb="tab"] {border-radius: 12px;}
 .stButton>button {border-radius: 999px; padding: 0.5rem 1rem; font-weight: 600;}
 </style>
@@ -115,15 +113,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# =================================
+# ==============================
 # ENV CHECK
-# =================================
+# ==============================
 if not os.getenv("OPENAI_API_KEY"):
     st.warning("OPENAI_API_KEY is not set — set it via environment or a .env file.")
 
-# =================================
-# HELPERS — DOCUMENT INGESTION (RAG)
-# =================================
+# ==============================
+# HELPERS — INGESTION
+# ==============================
 def _read_txt(file: io.BytesIO, name: str) -> List[Document]:
     text = file.read().decode("utf-8", errors="ignore")
     return [Document(page_content=text, metadata={"source": name})]
@@ -135,11 +133,9 @@ def _read_pdf_to_docs(tmp_path: Path, name: str) -> List[Document]:
         d.metadata = {**d.metadata, "source": name}
     return docs
 
-def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List[Image.Image]]:
-    """Extract images from a PDF with pypdf>=4. Add OCR+captions as RAG text docs when available."""
+def _extract_pdf_images(tmp_path: Path, name: str):
     from pypdf import PdfReader
-    pil_images: List[Image.Image] = []
-    ocr_docs: List[Document] = []
+    pil_images, ocr_docs = [], []
     try:
         reader = PdfReader(str(tmp_path))
         for page_idx, page in enumerate(reader.pages, start=1):
@@ -152,15 +148,18 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
                     img_bytes = im.data
                     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     pil_images.append(img)
-                    ocr_text = ""
+                    ocr_text, caption_text = "", ""
                     if _HAS_TESS:
                         try:
                             ocr_text = pytesseract.image_to_string(img)
                         except Exception:
                             ocr_text = ""
-                    caption_text = "\n".join(
-                        [ln for ln in page_text.splitlines() if re.match(r"\s*Fig(ure)?\b", ln, re.I)]
-                    )
+                    try:
+                        caption_text = "\n".join(
+                            [ln for ln in page_text.splitlines() if re.match(r"\s*Fig(ure)?\b", ln, re.I)]
+                        )
+                    except Exception:
+                        caption_text = ""
                     combined = "\n".join([s for s in [caption_text.strip(), ocr_text.strip()] if s])
                     if combined:
                         ocr_docs.append(
@@ -201,7 +200,7 @@ def _read_doc(file: io.BytesIO, name: str) -> List[Document]:
         return []
 
 def _read_xlsx(file: io.BytesIO, name: str) -> List[Document]:
-    docs: List[Document] = []
+    docs = []
     try:
         xl = pd.ExcelFile(file)
         for sheet in xl.sheet_names:
@@ -215,9 +214,8 @@ def _read_xlsx(file: io.BytesIO, name: str) -> List[Document]:
         st.error(f"Failed to parse Excel '{name}': {e}")
         return []
 
-def load_files_to_documents(uploaded_files) -> Tuple[List[Document], List[Image.Image]]:
-    all_docs: List[Document] = []
-    all_figs: List[Image.Image] = []
+def load_files_to_documents(uploaded_files):
+    all_docs, all_figs = [], []
     for uf in uploaded_files:
         suffix = Path(uf.name).suffix.lower()
         if suffix in [".txt", ".md", ".csv"]:
@@ -238,33 +236,20 @@ def load_files_to_documents(uploaded_files) -> Tuple[List[Document], List[Image.
             st.warning(f"Unsupported file type: {uf.name}")
     return all_docs, all_figs
 
-# =================================
-# HELPERS — SUPPLEMENT READERS (robust)
-# =================================
-def _rewind(file_obj):
-    try:
-        file_obj.seek(0)
-    except Exception:
-        pass
+# ==============================
+# TABLE READERS
+# ==============================
+def _rewind(f):
+    try: f.seek(0)
+    except: pass
 
 def _read_csv_any(file_obj):
     _rewind(file_obj)
     try:
-        df = pd.read_csv(
-            file_obj,
-            sep=None, engine="python", dtype=str,
-            na_filter=True, low_memory=False,
-            on_bad_lines="skip"
-        )
-        return df
+        return pd.read_csv(file_obj, sep=None, engine="python", dtype=str, na_filter=True, low_memory=False, on_bad_lines="skip")
     except Exception:
         _rewind(file_obj)
-        return pd.read_csv(
-            file_obj,
-            sep="\t", dtype=str,
-            na_filter=True, low_memory=False,
-            on_bad_lines="skip"
-        )
+        return pd.read_csv(file_obj, sep="\t", dtype=str, na_filter=True, low_memory=False, on_bad_lines="skip")
 
 def _read_excel_any(file_obj):
     _rewind(file_obj)
@@ -287,9 +272,9 @@ def _read_any_table(file_obj):
         st.warning(f"Unsupported supplement file type: {file_obj.name}")
         return pd.DataFrame()
 
-# =================================
-# HELPERS — FREQUENCY LOGIC
-# =================================
+# ==============================
+# GENE FREQUENCY HELPERS
+# ==============================
 def _standardize_cols(cols):
     return [str(c).strip().lower().replace(" ", "_") for c in cols]
 
@@ -301,7 +286,6 @@ def _find_col(cols, candidates):
     return None
 
 def infer_total_samples(named_frames, sample_cands=None) -> int:
-    """Infer denominator from any uploaded table that has a sample id column."""
     if sample_cands is None:
         sample_cands = [
             "tumor_sample_barcode", "sample_id", "sample", "biosample",
@@ -320,23 +304,13 @@ def infer_total_samples(named_frames, sample_cands=None) -> int:
     return len(uniq)
 
 def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = None):
-    """
-    df can be:
-      A) long format: (gene, sample_id)
-      B) aggregated:  (gene, count)
-    Returns (freq_df, denominator_used)
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["gene", "n_samples", "percentage"]), 0
-
     df = df.copy()
     df.columns = _standardize_cols(df.columns)
 
     gene_col   = _find_col(df.columns, ["gene", "symbol", "gene_symbol", "hgnc", "ensembl", "gene_id", "hugo_symbol"])
-    sample_col = _find_col(df.columns, [
-        "sample", "sample_id", "tumor_sample_barcode", "biosample",
-        "patient", "subject", "case_id", "case", "participant_id"
-    ])
+    sample_col = _find_col(df.columns, ["sample", "sample_id", "tumor_sample_barcode", "biosample", "patient", "subject", "case_id", "case", "participant_id"])
     count_col  = _find_col(df.columns, ["count", "n", "num", "samples"])
 
     if not gene_col:
@@ -361,10 +335,7 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
         denom = int(total_samples) if total_samples else int(grp["n_samples"].sum())
 
     else:
-        raise ValueError(
-            "Could not detect suitable columns. Expected either (gene + sample_id) or (gene + count). "
-            f"Columns seen: {list(df.columns)[:12]} ..."
-        )
+        raise ValueError("Could not detect suitable columns. Expected either (gene + sample_id) or (gene + count).")
 
     grp = grp.sort_values("n_samples", ascending=False)
     denom = max(int(denom), 1)
@@ -374,11 +345,10 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
         grp = grp.rename(columns={grp.columns[0]: "gene"})
     return grp, denom
 
-# =================================
-# BUILD / LOAD INDEX (Chroma — PersistentClient)
-# =================================
+# ==============================
+# CHROMA (PersistentClient)
+# ==============================
 def _chroma_client():
-    # This uses DuckDB+Parquet under the hood; no SQLite storage
     return chromadb.PersistentClient(path=PERSIST_DIR)
 
 def build_index(docs: List[Document]):
@@ -411,9 +381,9 @@ def load_existing_index():
     )
     return vs, embeddings
 
-# =================================
+# ==============================
 # PROMPTS
-# =================================
+# ==============================
 SUMMARY_SYSTEM = (
     "You are a meticulous scientific analyst. I am a bioinformatics software engineer. "
     "Generate a clear, concise, and strictly factual summary of the provided content. "
@@ -433,9 +403,9 @@ QA_SYSTEM = (
 QA_USER = "Question: {question}\n\nUse the context to answer concisely in 1-15 sentences.\n\nContext:\n{context}"
 qa_prompt = ChatPromptTemplate.from_messages([("system", QA_SYSTEM), ("human", QA_USER)])
 
-# =================================
-# SESSION STATE
-# =================================
+# ==============================
+# STATE
+# ==============================
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "all_docs" not in st.session_state:
@@ -443,9 +413,9 @@ if "all_docs" not in st.session_state:
 if "all_figs" not in st.session_state:
     st.session_state.all_figs = []
 
-# =================================
+# ==============================
 # SIDEBAR
-# =================================
+# ==============================
 with st.sidebar:
     st.subheader("Upload files")
     uploads = st.file_uploader(
@@ -453,15 +423,13 @@ with st.sidebar:
         type=["pdf", "txt", "md", "csv", "doc", "docx", "xlsx", "xlsm", "xls"],
         accept_multiple_files=True,
     )
-    colb1, colb2 = st.columns(2)
-    with colb1:
-        build_btn = st.button("Ingest Files", type="primary")
-    with colb2:
-        load_btn = st.button("Ingest Existing Files")
+    c1, c2 = st.columns(2)
+    with c1: build_btn = st.button("Ingest Files", type="primary")
+    with c2: load_btn = st.button("Ingest Existing Files")
 
-# =================================
-# INDEX ACTIONS
-# =================================
+# ==============================
+# ACTIONS
+# ==============================
 if build_btn:
     if not uploads:
         st.warning("Please upload at least one file.")
@@ -489,14 +457,11 @@ if load_btn:
         except Exception as e:
             st.exception(e)
 
-# =================================
+# ==============================
 # TABS
-# =================================
-summary_tab, qa_tab, figs_tab, freq_tab = st.tabs(
-    ["📝 Summary", "❓ Q&A", "🖼️ Figures", "📊 Gene Frequencies"]
-)
+# ==============================
+summary_tab, qa_tab, figs_tab, freq_tab = st.tabs(["📝 Summary", "❓ Q&A", "🖼️ Figures", "📊 Gene Frequencies"])
 
-# ----- Summary -----
 with summary_tab:
     st.write("Generate a concise overview of the ingested corpus.")
     if st.session_state.vectorstore is None and not st.session_state.all_docs:
@@ -517,7 +482,6 @@ with summary_tab:
                     summary = chain.invoke({"context": context_text})
                     st.markdown(summary)
 
-# ----- Q&A -----
 with qa_tab:
     st.write("Ask questions strictly from your files. If it’s not in them, the app will say it doesn’t know.")
     if st.session_state.vectorstore is None:
@@ -552,7 +516,6 @@ with qa_tab:
                         with st.expander(f"{i}. {src} — sheet: {sheet or '-'} — page: {page or '-'}"):
                             st.code(d.page_content[:2000])
 
-# ----- Figures -----
 with figs_tab:
     st.write("Extracted figures from PDFs (OCR text included in the index when available).")
     figs = st.session_state.all_figs
@@ -564,11 +527,8 @@ with figs_tab:
             with cols[i % 3]:
                 st.image(img, caption=f"Figure {i+1}", use_column_width=True)
 
-# ----- Gene Frequencies & Lookup -----
 with freq_tab:
     st.write("Upload **cBio-style tables** (mutations/CNA/SV/clinical). Then query gene frequencies below.")
-
-    # Upload tables
     supps = st.file_uploader(
         "Upload supplementary tables (CSV/TSV/TXT/XLSX)",
         type=["csv", "tsv", "txt", "xlsx", "xls"],
@@ -588,15 +548,12 @@ with freq_tab:
         if named_frames:
             st.session_state["supp_named_frames"] = named_frames
 
-    # Query UI
     st.markdown("---")
     st.subheader("🔎 Query Gene Frequency (mutations/CNA/SV) — multiple genes")
-
     if "supp_named_frames" not in st.session_state:
         st.info("Upload files above, then enter genes here.")
     else:
         named_frames = st.session_state["supp_named_frames"]
-
         genes_input = st.text_input("Gene symbols (comma-separated, e.g., TP53, EGFR, KRAS)")
         use_case_insensitive = st.checkbox("Case-insensitive match", value=True)
 
@@ -613,75 +570,48 @@ with freq_tab:
         ]
 
         def _norm(df: pd.DataFrame) -> pd.DataFrame:
-            d = df.copy()
-            d.columns = _standardize_cols(d.columns)
-            return d
-
+            d = df.copy(); d.columns = _standardize_cols(d.columns); return d
         def _find_sample_col(cols):
             return _find_col(cols, SAMPLE_COL_CANDS)
 
         def compute_numerator_for_gene(gene_query: str):
             gene_upper = gene_query.strip().upper()
-            numerator_samples = set()
-            add_rows_without_ids = 0
-            per_file_counts = []
-
+            numerator_samples = set(); add_rows_without_ids = 0; per_file_counts = []
             for fname, raw_df in named_frames:
-                if raw_df is None or raw_df.empty:
-                    continue
-                df = _norm(raw_df)
-                cols = list(df.columns)
-
+                if raw_df is None or raw_df.empty: continue
+                df = _norm(raw_df); cols = list(df.columns)
                 hugo_col = _find_col(cols, ["hugo_symbol"])
                 site1_col = _find_col(cols, ["site1_hugo_symbol"])
                 site2_col = _find_col(cols, ["site2_hugo_symbol"])
                 sample_col = _find_sample_col(cols)
-
                 file_added = 0
-
                 if hugo_col:
-                    mask = (
-                        df[hugo_col].astype(str).str.strip().str.upper() == gene_upper
-                        if use_case_insensitive else
-                        df[hugo_col].astype(str) == gene_query
-                    )
+                    mask = (df[hugo_col].astype(str).str.strip().str.upper() == gene_upper) if use_case_insensitive else (df[hugo_col].astype(str) == gene_query)
                     sub = df.loc[mask]
                     if not sub.empty:
                         if sample_col in sub.columns:
-                            ids = sub[sample_col].dropna().astype(str).str.strip()
-                            ids = set(ids.tolist())
-                            numerator_samples |= ids
-                            file_added = len(ids)
+                            ids = set(sub[sample_col].dropna().astype(str).str.strip().tolist())
+                            numerator_samples |= ids; file_added = len(ids)
                         else:
                             non_id_cols = [c for c in sub.columns if c != hugo_col]
-                            meta_like = {"entrez_gene_id", "chromosome", "cytoband"}
+                            meta_like = {"entrez_gene_id","chromosome","cytoband"}
                             non_id_cols = [c for c in non_id_cols if c not in meta_like]
                             if len(non_id_cols) > 5:
                                 nn = int(sub[non_id_cols].notna().sum(axis=1).max())
-                                add_rows_without_ids += nn
-                                file_added = nn
+                                add_rows_without_ids += nn; file_added = nn
                             else:
-                                cnt = int(len(sub))
-                                add_rows_without_ids += cnt
-                                file_added = cnt
-
+                                cnt = int(len(sub)); add_rows_without_ids += cnt; file_added = cnt
                 elif site1_col or site2_col:
                     m1 = df[site1_col].astype(str).str.strip().str.upper() == gene_upper if site1_col else False
                     m2 = df[site2_col].astype(str).str.strip().str.upper() == gene_upper if site2_col else False
                     sub = df.loc[m1 | m2]
                     if not sub.empty:
                         if sample_col in sub.columns:
-                            ids = sub[sample_col].dropna().astype(str).str.strip()
-                            ids = set(ids.tolist())
-                            numerator_samples |= ids
-                            file_added = len(ids)
+                            ids = set(sub[sample_col].dropna().astype(str).str.strip().tolist())
+                            numerator_samples |= ids; file_added = len(ids)
                         else:
-                            cnt = int(len(sub))
-                            add_rows_without_ids += cnt
-                            file_added = cnt
-
+                            cnt = int(len(sub)); add_rows_without_ids += cnt; file_added = cnt
                 per_file_counts.append((fname, file_added))
-
             numerator = len(numerator_samples) + add_rows_without_ids
             return int(numerator), per_file_counts
 
@@ -690,29 +620,18 @@ with freq_tab:
             seen = set(); genes = []
             for g in raw_list:
                 key = g.upper() if use_case_insensitive else g
-                if key not in seen:
-                    seen.add(key); genes.append(g)
-
+                if key not in seen: seen.add(key); genes.append(g)
             if denominator == 0:
                 st.warning("Denominator could not be inferred. Please set a value above.")
             else:
-                results = []
-                per_gene_breakdown = {}
-
+                results = []; per_gene_breakdown = {}
                 for g in genes:
                     num, breakdown = compute_numerator_for_gene(g)
                     per_gene_breakdown[g] = breakdown
                     pct = (num / denominator * 100.0)
-                    results.append({
-                        "gene": g,
-                        "n_samples": int(num),
-                        "denominator": int(denominator),
-                        "percentage": round(pct, 6),
-                    })
-
+                    results.append({"gene": g, "n_samples": int(num), "denominator": int(denominator), "percentage": round(pct, 6)})
                 st.markdown("**Per-gene results**")
                 st.dataframe(pd.DataFrame(results))
-
                 with st.expander("Per-file breakdown (by gene)"):
                     for g in genes:
                         st.markdown(f"**{g}**")
