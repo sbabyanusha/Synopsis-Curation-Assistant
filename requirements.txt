@@ -17,10 +17,10 @@ langchain>=0.3.3
 langchain-openai>=0.2.2
 langchain-community>=0.3.3
 
-# Vector store: Chroma 0.5.x isn’t happy on Py3.13 → use 0.4.x
+# Vector store: C
 chromadb==0.4.24
 duckdb>=1.0.0
-# (no hnswlib; it often lacks wheels on these builders)
+
 
 # Docs / OCR
 pypdf==4.2.0
