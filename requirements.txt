@@ -1,5 +1,6 @@
 --prefer-binary
---only-binary=numpy,pillow,hnswlib,duckdb
+# Only force binaries for packages that *do* have wheels broadly
+--only-binary=numpy,pillow,duckdb
 
 pip>=25.2
 wheel>=0.44.0
@@ -16,9 +17,8 @@ langchain==0.2.12
 langchain-openai==0.1.20
 langchain-community==0.2.11
 
-# Vector store (duckdb backend) + native ANN
+# Vector store (DuckDB backend; no hnswlib)
 chromadb[duckdb]==0.5.21
-hnswlib>=0.8
 duckdb>=1.0.0
 
 # Docs / OCR
