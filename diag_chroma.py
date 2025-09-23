@@ -12,18 +12,20 @@ def ver(name):
     except Exception as e:
         return f"FAIL: {e}"
 
-mods = ["numpy", "pandas", "chromadb", "langchain", "langchain_community", "langchain_openai", "pypdf"]
+mods = ["pip", "setuptools", "wheel", "numpy", "pandas", "chromadb", "langchain", "langchain_community", "langchain_openai", "pypdf"]
 for m in mods:
     st.write(m, "→", ver(m))
 
-# smoke test the sqlite patch and chroma persistent client
 try:
     import sys
-    import sqlite3
+    __import__("pysqlite3")
+    st.write("sqlite shim OK")
+except Exception as e:
+    st.write("sqlite shim not active:", e)
+
+try:
     import chromadb
-    st.write("sqlite3 module:", sqlite3.__name__, getattr(sqlite3, "sqlite_version", "n/a"))
     client = chromadb.PersistentClient(path="./chroma_index")
-    # create + drop a collection
     col = client.get_or_create_collection("diag_collection")
     col.add(ids=["a"], documents=["hello world"])
     st.success("Chroma PersistentClient OK (DuckDB+Parquet)")
