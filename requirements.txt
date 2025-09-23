@@ -1,4 +1,5 @@
 --prefer-binary
+# keep binary-only narrow to avoid brittle failures
 --only-binary=numpy,pillow,duckdb
 
 pip>=25.2
@@ -7,21 +8,23 @@ setuptools>=68
 
 # Core
 streamlit>=1.38,<2.0
-numpy==1.26.4
+numpy>=2.2,<2.4
 pandas==2.2.3
 pillow==10.4.0
 
-# LangChain
-langchain==0.2.12
-langchain-openai==0.1.20
-langchain-community==0.2.11
+# LangChain (NumPy 2–compatible trio)
+langchain>=0.3.3
+langchain-openai>=0.2.2
+langchain-community>=0.3.3
 
-# Vector store (DuckDB backend; no hnswlib)
-chromadb[duckdb]==0.5.21
+# Vector store: Chroma 0.5.x isn’t happy on Py3.13 → use 0.4.x
+chromadb==0.4.24
 duckdb>=1.0.0
+# (no hnswlib; it often lacks wheels on these builders)
 
 # Docs / OCR
 pypdf==4.2.0
 python-docx==1.1.2
 mammoth==1.6.0
 pytesseract==0.3.10
+
