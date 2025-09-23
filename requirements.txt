@@ -12,3 +12,4 @@ mammoth==1.6.0
 pytesseract==0.3.10
 # textract intentionally omitted (optional; requires system deps)
 pysqlite3-binary==0.5.2.post3
+
