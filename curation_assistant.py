@@ -13,29 +13,25 @@ Quickstart
 3) export OPENAI_API_KEY=sk-...
 4) streamlit run new_app.py
 
-Streamlit Curation Assistant Tool (Chroma v2 client)
-
-- Uses Chroma's new PersistentClient API (no deprecated Settings/Client)
-- Stores locally with DuckDB+Parquet (no SQLite storage)
-- Includes optional sqlite hotfix via pysqlite3-binary for import-time checks
+Streamlit Curation Assistant Tool — Chroma (new client API)
+- Uses chromadb.PersistentClient(path=...)  (DuckDB+Parquet storage)
+- SQLite import check patched via pysqlite3-binary (optional, safe)
+- Summarize/Q&A strictly from uploaded files + gene-frequency tool
 """
 
 from __future__ import annotations
 
-# ---- Optional sqlite hotfix (helps older systems) ----------------------------
-# Ensure this runs *before* importing chromadb or anything that imports sqlite3
+# ---------- SQLite hotfix (before ANY other imports that might touch sqlite3) ----------
 try:
     import sys
     __import__("pysqlite3")
     sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 except Exception:
+    # fine if not installed; requirements pin includes it
     pass
-# ----------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
-import io
-import os
-import re
-import tempfile
+import io, os, re, tempfile
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -51,13 +47,12 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Chroma new client
+# Chroma (new client API)
 import chromadb
 
 # Loaders
 from langchain_community.document_loaders import PyPDFLoader
-import docx
-import mammoth
+import docx, mammoth
 
 # Optional deps
 try:
@@ -82,8 +77,8 @@ CHUNK_OVERLAP = 150
 TOP_K = 5
 MMR_LAMBDA = 0.5
 
-PERSIST_DIR = "./chroma_index"           # directory for DuckDB+Parquet files
-COLLECTION_NAME = "curation_assistant"   # name in Chroma
+PERSIST_DIR = "./chroma_index"
+COLLECTION_NAME = "curation_assistant"
 
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
@@ -183,8 +178,8 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
 def _read_docx(file: io.BytesIO, name: str) -> List[Document]:
     try:
         f = io.BytesIO(file.read())
-        doc = docx.Document(f)
-        paragraphs = [p.text for p in doc.paragraphs]
+        d = docx.Document(f)
+        paragraphs = [p.text for p in d.paragraphs]
         text = "\n".join([p for p in paragraphs if p and p.strip()])
         return [Document(page_content=text, metadata={"source": name})]
     except Exception:
@@ -380,13 +375,13 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
     return grp, denom
 
 # =================================
-# BUILD / LOAD INDEX (Chroma PersistentClient)
+# BUILD / LOAD INDEX (Chroma — PersistentClient)
 # =================================
 def _chroma_client():
-    # DuckDB+Parquet local persistent store
+    # This uses DuckDB+Parquet under the hood; no SQLite storage
     return chromadb.PersistentClient(path=PERSIST_DIR)
 
-def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Document]]:
+def build_index(docs: List[Document]):
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     splits = splitter.split_documents(docs)
     if len(splits) == 0:
@@ -394,19 +389,19 @@ def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Do
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
 
     client = _chroma_client()
-    vectorstore = Chroma.from_documents(
+    vs = Chroma.from_documents(
         splits,
         embeddings,
         collection_name=COLLECTION_NAME,
         client=client,
     )
     try:
-        vectorstore.persist()
+        vs.persist()
     except Exception:
         pass
-    return vectorstore, embeddings, splits
+    return vs, embeddings, splits
 
-def load_existing_index() -> Tuple[Chroma, OpenAIEmbeddings]:
+def load_existing_index():
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
     client = _chroma_client()
     vs = Chroma(
@@ -573,7 +568,7 @@ with figs_tab:
 with freq_tab:
     st.write("Upload **cBio-style tables** (mutations/CNA/SV/clinical). Then query gene frequencies below.")
 
-    # ---------- Upload only ----------
+    # Upload tables
     supps = st.file_uploader(
         "Upload supplementary tables (CSV/TSV/TXT/XLSX)",
         type=["csv", "tsv", "txt", "xlsx", "xls"],
@@ -593,7 +588,7 @@ with freq_tab:
         if named_frames:
             st.session_state["supp_named_frames"] = named_frames
 
-    # ---------- Gene lookup & frequency ----------
+    # Query UI
     st.markdown("---")
     st.subheader("🔎 Query Gene Frequency (mutations/CNA/SV) — multiple genes")
 
@@ -626,7 +621,6 @@ with freq_tab:
             return _find_col(cols, SAMPLE_COL_CANDS)
 
         def compute_numerator_for_gene(gene_query: str):
-            """Return (numerator:int, per_file_counts:list[(file, counted)]) for one gene."""
             gene_upper = gene_query.strip().upper()
             numerator_samples = set()
             add_rows_without_ids = 0
@@ -645,7 +639,6 @@ with freq_tab:
 
                 file_added = 0
 
-                # Mutations/CNA (long) with Hugo_Symbol
                 if hugo_col:
                     mask = (
                         df[hugo_col].astype(str).str.strip().str.upper() == gene_upper
@@ -660,7 +653,6 @@ with freq_tab:
                             numerator_samples |= ids
                             file_added = len(ids)
                         else:
-                            # Wide CNA matrix (one row per gene): count non-null sample columns
                             non_id_cols = [c for c in sub.columns if c != hugo_col]
                             meta_like = {"entrez_gene_id", "chromosome", "cytoband"}
                             non_id_cols = [c for c in non_id_cols if c not in meta_like]
@@ -673,7 +665,6 @@ with freq_tab:
                                 add_rows_without_ids += cnt
                                 file_added = cnt
 
-                # Structural variants (SV) with Site1/2_Hugo_Symbol
                 elif site1_col or site2_col:
                     m1 = df[site1_col].astype(str).str.strip().str.upper() == gene_upper if site1_col else False
                     m2 = df[site2_col].astype(str).str.strip().str.upper() == gene_upper if site2_col else False
@@ -695,7 +686,6 @@ with freq_tab:
             return int(numerator), per_file_counts
 
         if st.button("Compute Gene Frequency") and genes_input.strip():
-            # Parse comma-separated list, trim, dedupe preserving order
             raw_list = [g.strip() for g in genes_input.split(",") if g.strip()]
             seen = set(); genes = []
             for g in raw_list:
