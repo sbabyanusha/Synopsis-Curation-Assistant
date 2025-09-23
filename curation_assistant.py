@@ -12,9 +12,26 @@ Quickstart
 2) pip install -r requirements.txt
 3) export OPENAI_API_KEY=sk-...
 4) streamlit run new_app.py
+
+Streamlit Curation Assistant Tool (Chroma v2 client)
+
+- Uses Chroma's new PersistentClient API (no deprecated Settings/Client)
+- Stores locally with DuckDB+Parquet (no SQLite storage)
+- Includes optional sqlite hotfix via pysqlite3-binary for import-time checks
 """
 
 from __future__ import annotations
+
+# ---- Optional sqlite hotfix (helps older systems) ----------------------------
+# Ensure this runs *before* importing chromadb or anything that imports sqlite3
+try:
+    import sys
+    __import__("pysqlite3")
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    pass
+# ----------------------------------------------------------------------------
+
 import io
 import os
 import re
@@ -33,6 +50,9 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+# Chroma new client
+import chromadb
 
 # Loaders
 from langchain_community.document_loaders import PyPDFLoader
@@ -61,7 +81,9 @@ CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 TOP_K = 5
 MMR_LAMBDA = 0.5
-PERSIST_DIR = "./chroma_index"
+
+PERSIST_DIR = "./chroma_index"           # directory for DuckDB+Parquet files
+COLLECTION_NAME = "curation_assistant"   # name in Chroma
 
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
@@ -358,15 +380,26 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
     return grp, denom
 
 # =================================
-# BUILD / LOAD INDEX (Chroma)
+# BUILD / LOAD INDEX (Chroma PersistentClient)
 # =================================
+def _chroma_client():
+    # DuckDB+Parquet local persistent store
+    return chromadb.PersistentClient(path=PERSIST_DIR)
+
 def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Document]]:
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     splits = splitter.split_documents(docs)
     if len(splits) == 0:
         raise ValueError("No text extracted from the uploaded files.")
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vectorstore = Chroma.from_documents(splits, embeddings, persist_directory=PERSIST_DIR)
+
+    client = _chroma_client()
+    vectorstore = Chroma.from_documents(
+        splits,
+        embeddings,
+        collection_name=COLLECTION_NAME,
+        client=client,
+    )
     try:
         vectorstore.persist()
     except Exception:
@@ -375,7 +408,12 @@ def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Do
 
 def load_existing_index() -> Tuple[Chroma, OpenAIEmbeddings]:
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vs = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+    client = _chroma_client()
+    vs = Chroma(
+        client=client,
+        collection_name=COLLECTION_NAME,
+        embedding_function=embeddings,
+    )
     return vs, embeddings
 
 # =================================
