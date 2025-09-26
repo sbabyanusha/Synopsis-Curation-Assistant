@@ -1,10 +1,15 @@
 from __future__ import annotations
+import os
 
-# --- NumPy 2.0 compatibility shim (restore removed alias used by some deps) ---
+# Force DuckDB so Chroma never checks sqlite
+os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
+os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
+
+# NumPy 2.0 compatibility shim (safe even on NumPy 1.26.x)
 try:
     import numpy as np
     if not hasattr(np, "float_"):
-        np.float_ = np.float64  # noqa: NPY201
+        np.float_ = np.float64
 except Exception:
     pass
 
