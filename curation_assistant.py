@@ -1,41 +1,31 @@
 from __future__ import annotations
 import os, sys
 
-# --- Force Chroma to DuckDB so it never touches system sqlite at import time
+# Force Chroma to DuckDB and provide sqlite shim BEFORE chromadb imports
 os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
 os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
 os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "1")
 
-# --- Preload a modern sqlite (satisfies Chroma's sqlite>=3.35 import-time check)
 try:
-    import pysqlite3  # requires pysqlite3-binary in requirements.txt
+    import pysqlite3
     sys.modules["sqlite3"] = sys.modules["pysqlite3"]
 except Exception:
     pass
 
-# --- NumPy 2.x compatibility shim (some deps still reference np.float_)
+# NumPy 2.x shim (legacy deps may reference np.float_)
 try:
     import numpy as np
     if not hasattr(np, "float_"):
-        np.float_ = np.float64  # noqa: NPY201
+        np.float_ = np.float64
 except Exception:
     pass
 
-import io
-import re
-import tempfile
-from pathlib import Path
-from typing import List, Tuple, Optional
-
 import streamlit as st
-import pandas as pd
-from PIL import Image
 
-# Prefer modern Chroma; fall back to legacy if unavailable
 try:
     from langchain_chroma import Chroma
 except ModuleNotFoundError:
-    from langchain_community.vectorstores import Chroma  # legacy path
+    from langchain_community.vectorstores import Chroma
 
 from chromadb.config import Settings as ChromaSettings
 
