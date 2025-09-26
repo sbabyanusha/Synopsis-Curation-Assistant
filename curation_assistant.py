@@ -27,12 +27,19 @@ try:
 except Exception:
     NP_SHIM_OK = False
 
+import io
+import re
+import tempfile
+from pathlib import Path
+from typing import List, Tuple, Optional
+
 import streamlit as st
+import pandas as pd
+from PIL import Image
 
-# ==============================================================
-# DIAGNOSTIC PANEL — shows what actually imported on Cloud
-# ==============================================================
-
+# =============================================================
+# DIAGNOSTICS
+# =============================================================
 def _diag_panel(stage: str, extras: dict | None = None):
     st.sidebar.markdown("### 🔧 Diagnostics")
     st.sidebar.write(
@@ -45,7 +52,7 @@ def _diag_panel(stage: str, extras: dict | None = None):
         }
     )
 
-# Try both Chroma import paths with robust fallbacks
+# Prefer modern Chroma; fall back to legacy path if unavailable
 Chroma = None
 chroma_source = None
 try:
@@ -53,7 +60,6 @@ try:
     Chroma = _Chroma
     chroma_source = "langchain_chroma"
 except Exception as e1:
-    # show error but continue to fallback
     st.sidebar.write({"langchain_chroma_import_error": repr(e1)})
     try:
         from langchain_community.vectorstores import Chroma as _Chroma
@@ -71,14 +77,16 @@ try:
 except Exception as e:
     st.sidebar.write({"chromadb_settings_import_error": repr(e)})
 
-_diag_panel(
-    "imports",
-    {
-        "Chroma_resolved": bool(Chroma),
-        "chroma_source": chroma_source,
-        "ChromaSettings_resolved": chroma_settings_ok,
-    },
-)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+
+# Readers
+from langchain_community.document_loaders import PyPDFLoader
+import docx
+import mammoth
 
 # ================================
 # Streamlit page config
@@ -97,10 +105,13 @@ PERSIST_DIR = "./chroma_index"
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
 
-CHROMA_SETTINGS = ChromaSettings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory=PERSIST_DIR,
-)
+if chroma_settings_ok:
+    CHROMA_SETTINGS = ChromaSettings(
+        chroma_db_impl="duckdb+parquet",
+        persist_directory=PERSIST_DIR,
+    )
+else:
+    CHROMA_SETTINGS = None
 
 # ================================
 # Styles
@@ -141,6 +152,30 @@ st.markdown(
 if not os.getenv("OPENAI_API_KEY"):
     st.warning("OPENAI_API_KEY is not set — set it via environment or a .env file.")
 
+_diag_panel(
+    "imports",
+    {
+        "Chroma_resolved": bool(Chroma),
+        "chroma_source": chroma_source,
+        "ChromaSettings_resolved": chroma_settings_ok,
+    },
+)
+
+# Smoke test buttons
+if st.sidebar.button("Run import smoke test"):
+    try:
+        import chromadb  # noqa: F401
+        st.sidebar.success("chromadb import OK")
+    except Exception as e:
+        st.sidebar.error("chromadb import failed")
+        st.sidebar.code("".join(traceback.format_exception(e)))
+    try:
+        import langchain_chroma  # noqa: F401
+        st.sidebar.success("langchain_chroma import OK")
+    except Exception as e:
+        st.sidebar.warning("langchain_chroma import failed (fallback path may still work)")
+        st.sidebar.code("".join(traceback.format_exception(e)))
+
 # ================================
 # Ingestion helpers
 # ================================
@@ -172,7 +207,8 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
                     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     pil_images.append(img)
                     ocr_text = ""
-                    if _HAS_TESS:
+                    if "pytesseract" in sys.modules:
+                        import pytesseract  # local import
                         try:
                             ocr_text = pytesseract.image_to_string(img)
                         except Exception:
@@ -207,18 +243,6 @@ def _read_docx(file: io.BytesIO, name: str) -> List[Document]:
         text = result.value or ""
         return [Document(page_content=text, metadata={"source": name})]
 
-def _read_doc(file: io.BytesIO, name: str) -> List[Document]:
-    if not _HAS_TEXTRACT:
-        st.warning(f"Skipping legacy .doc file '{name}': optional dependency 'textract' not available.")
-        return []
-    try:
-        data = file.read()
-        text = textract.process(io.BytesIO(data)).decode("utf-8", errors="ignore")
-        return [Document(page_content=text, metadata={"source": name})]
-    except Exception as e:
-        st.error(f"Failed to parse .doc '{name}': {e}")
-        return []
-
 def _read_xlsx(file: io.BytesIO, name: str) -> List[Document]:
     docs: List[Document] = []
     try:
@@ -249,8 +273,6 @@ def load_files_to_documents(uploaded_files) -> Tuple[List[Document], List[Image.
             all_docs.extend(docs); all_docs.extend(ocr_docs); all_figs.extend(figs)
         elif suffix == ".docx":
             all_docs.extend(_read_docx(uf, uf.name))
-        elif suffix == ".doc":
-            all_docs.extend(_read_doc(uf, uf.name))
         elif suffix in [".xlsx", ".xlsm", ".xls"]:
             all_docs.extend(_read_xlsx(uf, uf.name))
         else:
@@ -380,31 +402,49 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
 # ================================
 # Build / Load Index
 # ================================
-def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Document]]:
+def build_index(docs: List[Document]):
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     splits = splitter.split_documents(docs)
     if len(splits) == 0:
         raise ValueError("No text extracted from the uploaded files.")
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vectorstore = Chroma.from_documents(
-        splits,
-        embeddings,
-        persist_directory=PERSIST_DIR,
-        client_settings=CHROMA_SETTINGS,
-    )
+    if CHROMA_SETTINGS is not None and Chroma is not None:
+        vectorstore = Chroma.from_documents(
+            splits,
+            embeddings,
+            persist_directory=PERSIST_DIR,
+            client_settings=CHROMA_SETTINGS,
+        )
+    elif Chroma is not None:
+        vectorstore = Chroma.from_documents(
+            splits,
+            embeddings,
+            persist_directory=PERSIST_DIR,
+        )
+    else:
+        # As a last resort, raise a helpful error
+        raise RuntimeError("Chroma could not be imported from either path. Check requirements and logs.")
     try:
         vectorstore.persist()
     except Exception:
         pass
     return vectorstore, embeddings, splits
 
-def load_existing_index() -> Tuple[Chroma, OpenAIEmbeddings]:
+def load_existing_index():
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vs = Chroma(
-        persist_directory=PERSIST_DIR,
-        embedding_function=embeddings,
-        client_settings=CHROMA_SETTINGS,
-    )
+    if CHROMA_SETTINGS is not None and Chroma is not None:
+        vs = Chroma(
+            persist_directory=PERSIST_DIR,
+            embedding_function=embeddings,
+            client_settings=CHROMA_SETTINGS,
+        )
+    elif Chroma is not None:
+        vs = Chroma(
+            persist_directory=PERSIST_DIR,
+            embedding_function=embeddings,
+        )
+    else:
+        raise RuntimeError("Chroma could not be imported from either path. Check requirements and logs.")
     return vs, embeddings
 
 # ================================
@@ -605,13 +645,23 @@ with freq_tab:
             "patient", "subject", "case_id", "case", "participant_id"
         ]
 
+        def _standardize_cols_local(cols):
+            return [str(c).strip().lower().replace(" ", "_") for c in cols]
+
         def _norm(df: pd.DataFrame) -> pd.DataFrame:
             d = df.copy()
-            d.columns = _standardize_cols(d.columns)
+            d.columns = _standardize_cols_local(d.columns)
             return d
 
+        def _find_col_local(cols, candidates):
+            for c in cols:
+                for cand in candidates:
+                    if c == cand or c.endswith(f"_{cand}") or cand in c:
+                        return c
+            return None
+
         def _find_sample_col(cols):
-            return _find_col(cols, SAMPLE_COL_CANDS)
+            return _find_col_local(cols, SAMPLE_COL_CANDS)
 
         def compute_numerator_for_gene(gene_query: str):
             gene_upper = gene_query.strip().upper()
@@ -625,9 +675,9 @@ with freq_tab:
                 df = _norm(raw_df)
                 cols = list(df.columns)
 
-                hugo_col = _find_col(cols, ["hugo_symbol"])
-                site1_col = _find_col(cols, ["site1_hugo_symbol"])
-                site2_col = _find_col(cols, ["site2_hugo_symbol"])
+                hugo_col = _find_col_local(cols, ["hugo_symbol"])
+                site1_col = _find_col_local(cols, ["site1_hugo_symbol"])
+                site2_col = _find_col_local(cols, ["site2_hugo_symbol"])
                 sample_col = _find_sample_col(cols)
 
                 file_added = 0
