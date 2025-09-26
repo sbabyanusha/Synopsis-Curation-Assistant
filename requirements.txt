@@ -1,7 +1,7 @@
 # Core
 streamlit==1.38.0
 rich==13.9.4
-numpy>=2.2        # Py3.13 has no NumPy <2.0 wheels; we’ll use the np.float_ shim in code
+numpy>=2.2
 pandas==2.2.3
 pillow==10.4.0
 
@@ -12,7 +12,7 @@ langchain-openai>=0.1
 chromadb>=0.5.4
 langchain-chroma>=0.2.2
 duckdb>=1.0.0
-pysqlite3-binary==0.5.2.post3   # provides modern sqlite so chroma’s check passes
+pysqlite3-binary==0.5.2.post3
 
 # Docs / OCR
 pypdf==4.2.0
