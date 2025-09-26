@@ -1,19 +1,25 @@
 from __future__ import annotations
-import os
+import os, sys
 
-# Force DuckDB so Chroma never checks sqlite
+# --- Force Chroma to DuckDB so it never touches system sqlite at import time
 os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
 os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
 
-# NumPy 2.0 compatibility shim (safe even on NumPy 1.26.x)
+# --- Preload a modern sqlite (satisfies Chroma's import-time sqlite>=3.35 check)
 try:
-    import numpy as np
-    if not hasattr(np, "float_"):
-        np.float_ = np.float64
+    import pysqlite3  # requires pysqlite3-binary in requirements.txt
+    sys.modules["sqlite3"] = sys.modules["pysqlite3"]
 except Exception:
     pass
 
-import os
+# --- NumPy 2.x shim for legacy deps that still reference np.float_
+try:
+    import numpy as np
+    if not hasattr(np, "float_"):
+        np.float_ = np.float64  # noqa: NPY201
+except Exception:
+    pass
+
 import io
 import re
 import tempfile
@@ -24,11 +30,11 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 
-# Prefer modern Chroma integration; fall back to legacy path if missing
+# Prefer modern Chroma; fall back to legacy if unavailable
 try:
     from langchain_chroma import Chroma
 except ModuleNotFoundError:
-    from langchain_community.vectorstores import Chroma  # legacy path still works
+    from langchain_community.vectorstores import Chroma  # legacy path
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -41,30 +47,30 @@ from langchain_community.document_loaders import PyPDFLoader
 import docx
 import mammoth
 
-# Chroma backend configuration (explicit for Streamlit Cloud)
+# Explicit Chroma backend config (also forced via env above)
 from chromadb.config import Settings as ChromaSettings
 
 # Optional deps
 try:
-    import pytesseract  # OCR
+    import pytesseract
     _HAS_TESS = True
 except Exception:
     _HAS_TESS = False
 
 try:
-    import textract  # legacy .doc
+    import textract
     _HAS_TEXTRACT = True
 except Exception:
     _HAS_TEXTRACT = False
 
-# =================================
-# STREAMLIT PAGE CONFIG (must be first Streamlit call)
-# =================================
+# ================================
+# Streamlit page config
+# ================================
 st.set_page_config(page_title="🧬 Curation Assistant", page_icon="🧠", layout="wide")
 
-# =================================
-# CONSTANTS
-# =================================
+# ================================
+# Constants
+# ================================
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 TOP_K = 5
@@ -74,15 +80,14 @@ PERSIST_DIR = "./chroma_index"
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
 
-# Explicit Chroma backend to avoid runtime errors in managed hosts
 CHROMA_SETTINGS = ChromaSettings(
     chroma_db_impl="duckdb+parquet",
     persist_directory=PERSIST_DIR,
 )
 
-# =================================
-# STYLES
-# =================================
+# ================================
+# Styles
+# ================================
 st.markdown(
     """
 <style>
@@ -113,15 +118,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# =================================
-# ENV CHECK
-# =================================
+# ================================
+# ENV
+# ================================
 if not os.getenv("OPENAI_API_KEY"):
     st.warning("OPENAI_API_KEY is not set — set it via environment or a .env file.")
 
-# =================================
-# HELPERS — DOCUMENT INGESTION (RAG)
-# =================================
+# ================================
+# Ingestion helpers
+# ================================
 def _read_txt(file: io.BytesIO, name: str) -> List[Document]:
     text = file.read().decode("utf-8", errors="ignore")
     return [Document(page_content=text, metadata={"source": name})]
@@ -134,7 +139,6 @@ def _read_pdf_to_docs(tmp_path: Path, name: str) -> List[Document]:
     return docs
 
 def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List[Image.Image]]:
-    """Extract images from a PDF with pypdf>=4. Add OCR+captions as RAG text docs when available."""
     from pypdf import PdfReader
     pil_images: List[Image.Image] = []
     ocr_docs: List[Document] = []
@@ -145,7 +149,6 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
                 page_text = page.extract_text() or ""
             except Exception:
                 page_text = ""
-            # pypdf v4 exposes images per page; guard with getattr
             for im in getattr(page, "images", []):
                 try:
                     img_bytes = im.data
@@ -237,9 +240,9 @@ def load_files_to_documents(uploaded_files) -> Tuple[List[Document], List[Image.
             st.warning(f"Unsupported file type: {uf.name}")
     return all_docs, all_figs
 
-# =================================
-# HELPERS — SUPPLEMENT READERS (robust)
-# =================================
+# ================================
+# Table readers (robust)
+# ================================
 def _rewind(file_obj):
     try:
         file_obj.seek(0)
@@ -249,21 +252,12 @@ def _rewind(file_obj):
 def _read_csv_any(file_obj):
     _rewind(file_obj)
     try:
-        df = pd.read_csv(
-            file_obj,
-            sep=None, engine="python", dtype=str,
-            na_filter=True, low_memory=False,
-            on_bad_lines="skip"
-        )
-        return df
+        return pd.read_csv(file_obj, sep=None, engine="python", dtype=str, na_filter=True,
+                           low_memory=False, on_bad_lines="skip")
     except Exception:
         _rewind(file_obj)
-        return pd.read_csv(
-            file_obj,
-            sep="\t", dtype=str,
-            na_filter=True, low_memory=False,
-            on_bad_lines="skip"
-        )
+        return pd.read_csv(file_obj, sep="\t", dtype=str, na_filter=True,
+                           low_memory=False, on_bad_lines="skip")
 
 def _read_excel_any(file_obj):
     _rewind(file_obj)
@@ -286,9 +280,9 @@ def _read_any_table(file_obj):
         st.warning(f"Unsupported supplement file type: {file_obj.name}")
         return pd.DataFrame()
 
-# =================================
-# HELPERS — FREQUENCY LOGIC
-# =================================
+# ================================
+# Gene frequency helpers
+# ================================
 def _standardize_cols(cols):
     return [str(c).strip().lower().replace(" ", "_") for c in cols]
 
@@ -300,7 +294,6 @@ def _find_col(cols, candidates):
     return None
 
 def infer_total_samples(named_frames, sample_cands=None) -> int:
-    """Infer denominator from any uploaded table that has a sample id column."""
     if sample_cands is None:
         sample_cands = [
             "tumor_sample_barcode", "sample_id", "sample", "biosample",
@@ -319,12 +312,6 @@ def infer_total_samples(named_frames, sample_cands=None) -> int:
     return len(uniq)
 
 def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = None):
-    """
-    df can be:
-      A) long format: (gene, sample_id)
-      B) aggregated:  (gene, count)
-    Returns (freq_df, denominator_used)
-    """
     if df is None or df.empty:
         return pd.DataFrame(columns=["gene", "n_samples", "percentage"]), 0
 
@@ -373,9 +360,9 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
         grp = grp.rename(columns={grp.columns[0]: "gene"})
     return grp, denom
 
-# =================================
-# BUILD / LOAD INDEX (Chroma)
-# =================================
+# ================================
+# Build / Load Index
+# ================================
 def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Document]]:
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     splits = splitter.split_documents(docs)
@@ -403,14 +390,13 @@ def load_existing_index() -> Tuple[Chroma, OpenAIEmbeddings]:
     )
     return vs, embeddings
 
-# =================================
-# PROMPTS
-# =================================
+# ================================
+# Prompts
+# ================================
 SUMMARY_SYSTEM = (
     "You are a meticulous scientific analyst. Generate a clear, concise, and strictly factual summary of the provided "
     "content. Do not speculate or add external knowledge. If tables exist, highlight the most important columns and "
-    "notable values. If figures are present, briefly describe the key features or findings they illustrate. "
-    "Keep the summary precise, structured, and grounded in the source material."
+    "notable values. If figures are present, briefly describe key features they illustrate. Keep the summary grounded."
 )
 SUMMARY_USER = "Summarize the following corpus in <= 20 bullet points. If multiple files are present, group by source name.\n\n{context}"
 summary_prompt = ChatPromptTemplate.from_messages([("system", SUMMARY_SYSTEM), ("human", SUMMARY_USER)])
@@ -423,9 +409,9 @@ QA_SYSTEM = (
 QA_USER = "Question: {question}\n\nUse the context to answer concisely in 1-15 sentences.\n\nContext:\n{context}"
 qa_prompt = ChatPromptTemplate.from_messages([("system", QA_SYSTEM), ("human", QA_USER)])
 
-# =================================
-# SESSION STATE
-# =================================
+# ================================
+# Session State
+# ================================
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "all_docs" not in st.session_state:
@@ -435,9 +421,9 @@ if "all_figs" not in st.session_state:
 if "supp_named_frames" not in st.session_state:
     st.session_state.supp_named_frames = []
 
-# =================================
-# SIDEBAR
-# =================================
+# ================================
+# Sidebar
+# ================================
 with st.sidebar:
     st.subheader("Upload files")
     uploads = st.file_uploader(
@@ -451,9 +437,9 @@ with st.sidebar:
     with colb2:
         load_btn = st.button("Load Existing Index")
 
-# =================================
-# INDEX ACTIONS
-# =================================
+# ================================
+# Index actions
+# ================================
 if build_btn:
     if not uploads:
         st.warning("Please upload at least one file.")
@@ -481,9 +467,9 @@ if load_btn:
         except Exception as e:
             st.exception(e)
 
-# =================================
-# TABS
-# =================================
+# ================================
+# Tabs
+# ================================
 summary_tab, qa_tab, figs_tab, freq_tab = st.tabs(
     ["📝 Summary", "❓ Q&A", "🖼️ Figures", "📊 Gene Frequencies"]
 )
@@ -556,11 +542,10 @@ with figs_tab:
             with cols[i % 3]:
                 st.image(img, caption=f"Figure {i+1}", use_column_width=True)
 
-# ----- Gene Frequencies & Lookup -----
+# ----- Gene Frequencies -----
 with freq_tab:
     st.write("Upload **cBio-style tables** (mutations/CNA/SV/clinical). Then query gene frequencies below.")
 
-    # ---------- Upload only ----------
     supps = st.file_uploader(
         "Upload supplementary tables (CSV/TSV/TXT/XLSX)",
         type=["csv", "tsv", "txt", "xlsx", "xls"],
@@ -580,7 +565,6 @@ with freq_tab:
         if named_frames:
             st.session_state["supp_named_frames"] = named_frames
 
-    # ---------- Gene lookup & frequency ----------
     st.markdown("---")
     st.subheader("🔎 Query Gene Frequency (mutations/CNA/SV) — multiple genes")
 
@@ -613,7 +597,6 @@ with freq_tab:
             return _find_col(cols, SAMPLE_COL_CANDS)
 
         def compute_numerator_for_gene(gene_query: str):
-            """Return (numerator:int, per_file_counts:list[(file, counted)]) for one gene."""
             gene_upper = gene_query.strip().upper()
             numerator_samples = set()
             add_rows_without_ids = 0
@@ -632,7 +615,6 @@ with freq_tab:
 
                 file_added = 0
 
-                # Mutations/CNA (long) with Hugo_Symbol
                 if hugo_col:
                     mask = (
                         df[hugo_col].astype(str).str.strip().str.upper() == gene_upper
@@ -647,7 +629,6 @@ with freq_tab:
                             numerator_samples |= ids
                             file_added = len(ids)
                         else:
-                            # Wide CNA matrix (row=gene): count non-null sample columns
                             non_id_cols = [c for c in sub.columns if c != hugo_col]
                             meta_like = {"entrez_gene_id", "chromosome", "cytoband"}
                             non_id_cols = [c for c in non_id_cols if c not in meta_like]
@@ -660,7 +641,6 @@ with freq_tab:
                                 add_rows_without_ids += cnt
                                 file_added = cnt
 
-                # Structural variants (SV) with Site1/2_Hugo_Symbol
                 elif site1_col or site2_col:
                     m1 = df[site1_col].astype(str).str.strip().str.upper() == gene_upper if site1_col else False
                     m2 = df[site2_col].astype(str).str.strip().str.upper() == gene_upper if site2_col else False
@@ -682,7 +662,6 @@ with freq_tab:
             return int(numerator), per_file_counts
 
         if st.button("Compute Gene Frequency") and genes_input.strip():
-            # Parse comma-separated list, trim, dedupe preserving order
             raw_list = [g.strip() for g in genes_input.split(",") if g.strip()]
             seen = set(); genes = []
             for g in raw_list:
@@ -695,7 +674,6 @@ with freq_tab:
             else:
                 results = []
                 per_gene_breakdown = {}
-
                 for g in genes:
                     num, breakdown = compute_numerator_for_gene(g)
                     per_gene_breakdown[g] = breakdown
