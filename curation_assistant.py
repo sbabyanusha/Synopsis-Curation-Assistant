@@ -1,22 +1,15 @@
-"""
-Streamlit Curation Assistant Tool
-
-- Summarize & Q&A strictly from uploaded files (.pdf, .txt, .doc/.docx, .xlsx)
-- Extract figures/images from PDFs, and add to the RAG index
-- Upload cBio-style tables (mutations/CNA/SV/clinical) and query gene frequencies
-- Query multiple genes (e.g., TP53, EGFR, KRAS) and compute % = (# profiled samples for gene / total profiled samples) * 100
-
-Quickstart
-----------
-1) Python 3.9+  (3.10+ recommended)
-2) pip install -r requirements.txt
-3) export OPENAI_API_KEY=sk-...
-4) streamlit run new_app.py
-"""
-
 from __future__ import annotations
-import io
+
+# --- NumPy 2.0 compatibility shim (restore removed alias used by some deps) ---
+try:
+    import numpy as np
+    if not hasattr(np, "float_"):
+        np.float_ = np.float64  # noqa: NPY201
+except Exception:
+    pass
+
 import os
+import io
 import re
 import tempfile
 from pathlib import Path
@@ -26,18 +19,25 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 
-# LangChain
+# Prefer modern Chroma integration; fall back to legacy path if missing
+try:
+    from langchain_chroma import Chroma
+except ModuleNotFoundError:
+    from langchain_community.vectorstores import Chroma  # legacy path still works
+
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Loaders
+# Readers
 from langchain_community.document_loaders import PyPDFLoader
 import docx
 import mammoth
+
+# Chroma backend configuration (explicit for Streamlit Cloud)
+from chromadb.config import Settings as ChromaSettings
 
 # Optional deps
 try:
@@ -53,10 +53,13 @@ except Exception:
     _HAS_TEXTRACT = False
 
 # =================================
-# CONFIG & CONSTANTS
+# STREAMLIT PAGE CONFIG (must be first Streamlit call)
 # =================================
-st.set_page_config(page_title="Synopsis + Gene Frequencies", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="🧬 Curation Assistant", page_icon="🧠", layout="wide")
 
+# =================================
+# CONSTANTS
+# =================================
 CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 150
 TOP_K = 5
@@ -65,6 +68,12 @@ PERSIST_DIR = "./chroma_index"
 
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
+
+# Explicit Chroma backend to avoid runtime errors in managed hosts
+CHROMA_SETTINGS = ChromaSettings(
+    chroma_db_impl="duckdb+parquet",
+    persist_directory=PERSIST_DIR,
+)
 
 # =================================
 # STYLES
@@ -92,6 +101,7 @@ st.markdown(
   <h2 style="margin:0">🧬 Curation Assistant Tool</h2>
   <div style="margin-top:6px">
     Answers grounded strictly in your uploaded files.
+    <span class="tag">Chroma</span><span class="tag">MMR</span><span class="tag">OCR</span><span class="tag">Frequencies</span>
   </div>
 </div>
 """,
@@ -130,6 +140,7 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
                 page_text = page.extract_text() or ""
             except Exception:
                 page_text = ""
+            # pypdf v4 exposes images per page; guard with getattr
             for im in getattr(page, "images", []):
                 try:
                     img_bytes = im.data
@@ -366,7 +377,12 @@ def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Do
     if len(splits) == 0:
         raise ValueError("No text extracted from the uploaded files.")
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vectorstore = Chroma.from_documents(splits, embeddings, persist_directory=PERSIST_DIR)
+    vectorstore = Chroma.from_documents(
+        splits,
+        embeddings,
+        persist_directory=PERSIST_DIR,
+        client_settings=CHROMA_SETTINGS,
+    )
     try:
         vectorstore.persist()
     except Exception:
@@ -375,25 +391,27 @@ def build_index(docs: List[Document]) -> Tuple[Chroma, OpenAIEmbeddings, List[Do
 
 def load_existing_index() -> Tuple[Chroma, OpenAIEmbeddings]:
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    vs = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+    vs = Chroma(
+        persist_directory=PERSIST_DIR,
+        embedding_function=embeddings,
+        client_settings=CHROMA_SETTINGS,
+    )
     return vs, embeddings
 
 # =================================
 # PROMPTS
 # =================================
 SUMMARY_SYSTEM = (
-    "You are a meticulous scientific analyst. I am a bioinformatics software engineer. "
-    "Generate a clear, concise, and strictly factual summary of the provided content. "
-    "Do not speculate or add external knowledge. "
-    "If the content includes tables, highlight the most important columns and notable values. "
-    "If figures are present, briefly describe the key features or findings they illustrate. "
-    "Keep the summary precise, structured, and directly grounded in the source material."
+    "You are a meticulous scientific analyst. Generate a clear, concise, and strictly factual summary of the provided "
+    "content. Do not speculate or add external knowledge. If tables exist, highlight the most important columns and "
+    "notable values. If figures are present, briefly describe the key features or findings they illustrate. "
+    "Keep the summary precise, structured, and grounded in the source material."
 )
 SUMMARY_USER = "Summarize the following corpus in <= 20 bullet points. If multiple files are present, group by source name.\n\n{context}"
 summary_prompt = ChatPromptTemplate.from_messages([("system", SUMMARY_SYSTEM), ("human", SUMMARY_USER)])
 
 QA_SYSTEM = (
-    "You are a bioinformatics software engineer. You answer questions ONLY using the given context. "
+    "You are a bioinformatics software engineer. Answer ONLY using the given context. "
     "If the answer isn't in the context, say 'I don't know from the provided files.' "
     "Provide brief citations like (source, optional sheet/page)."
 )
@@ -409,6 +427,8 @@ if "all_docs" not in st.session_state:
     st.session_state.all_docs = []
 if "all_figs" not in st.session_state:
     st.session_state.all_figs = []
+if "supp_named_frames" not in st.session_state:
+    st.session_state.supp_named_frames = []
 
 # =================================
 # SIDEBAR
@@ -424,7 +444,7 @@ with st.sidebar:
     with colb1:
         build_btn = st.button("Ingest Files", type="primary")
     with colb2:
-        load_btn = st.button("Ingest Existing Files")
+        load_btn = st.button("Load Existing Index")
 
 # =================================
 # INDEX ACTIONS
@@ -559,7 +579,7 @@ with freq_tab:
     st.markdown("---")
     st.subheader("🔎 Query Gene Frequency (mutations/CNA/SV) — multiple genes")
 
-    if "supp_named_frames" not in st.session_state:
+    if "supp_named_frames" not in st.session_state or not st.session_state["supp_named_frames"]:
         st.info("Upload files above, then enter genes here.")
     else:
         named_frames = st.session_state["supp_named_frames"]
@@ -622,7 +642,7 @@ with freq_tab:
                             numerator_samples |= ids
                             file_added = len(ids)
                         else:
-                            # Wide CNA matrix (one row per gene): count non-null sample columns
+                            # Wide CNA matrix (row=gene): count non-null sample columns
                             non_id_cols = [c for c in sub.columns if c != hugo_col]
                             meta_like = {"entrez_gene_id", "chromosome", "cytoband"}
                             non_id_cols = [c for c in non_id_cols if c not in meta_like]
