@@ -2,15 +2,10 @@ from __future__ import annotations
 import os, sys, traceback
 
 # ------------------------------------------------------------------
-# Force Chroma -> DuckDB and inject a modern sqlite BEFORE imports
+# Modern sqlite shim for Python 3.13 (satisfies Chroma's sqlite needs)
 # ------------------------------------------------------------------
-os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
-os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
-os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "1")
-
-# Provide modern sqlite for chroma's import-time check
 try:
-    import pysqlite3  # requires pysqlite3-binary==0.5.4 in requirements
+    import pysqlite3  # requires pysqlite3-binary in requirements
     sys.modules["sqlite3"] = sys.modules["pysqlite3"]
     SQLITE_SHIM_OK = True
 except Exception:
@@ -37,22 +32,7 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 
-# =============================================================
-# DIAGNOSTICS
-# =============================================================
-def _diag_panel(stage: str, extras: dict | None = None):
-    st.sidebar.markdown("### 🔧 Diagnostics")
-    st.sidebar.write(
-        {
-            "stage": stage,
-            "python": sys.version,
-            "SQLITE_SHIM_OK": SQLITE_SHIM_OK,
-            "NP_SHIM_OK": NP_SHIM_OK,
-            **(extras or {}),
-        }
-    )
-
-# Prefer modern Chroma; fall back to legacy path if unavailable
+# Prefer modern Chroma vectorstore; fall back if needed
 Chroma = None
 chroma_source = None
 try:
@@ -60,22 +40,24 @@ try:
     Chroma = _Chroma
     chroma_source = "langchain_chroma"
 except Exception as e1:
-    st.sidebar.write({"langchain_chroma_import_error": repr(e1)})
     try:
         from langchain_community.vectorstores import Chroma as _Chroma
         Chroma = _Chroma
         chroma_source = "langchain_community"
     except Exception as e2:
-        st.sidebar.write({"community_chroma_import_error": repr(e2)})
+        st.sidebar.write({"chroma_import_error": (repr(e1), repr(e2))})
 
-# Import Chroma settings (guarded)
-ChromaSettings = None
-chroma_settings_ok = False
+# New Chroma client API (migration-safe)
+chromadb = None
+CLIENT = None
+client_error = None
 try:
-    from chromadb.config import Settings as ChromaSettings  # type: ignore
-    chroma_settings_ok = True
+    import chromadb
+    from chromadb import PersistentClient
+    # Use new client; no legacy settings or env vars
+    CLIENT = PersistentClient(path="./chroma_index")
 except Exception as e:
-    st.sidebar.write({"chromadb_settings_import_error": repr(e)})
+    client_error = e
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -101,17 +83,10 @@ CHUNK_OVERLAP = 150
 TOP_K = 5
 MMR_LAMBDA = 0.5
 PERSIST_DIR = "./chroma_index"
+COLLECTION = "curation_assistant"
 
 EMBED_MODEL = "text-embedding-3-small"
 LLM_MODEL = "gpt-4o-mini"
-
-if chroma_settings_ok:
-    CHROMA_SETTINGS = ChromaSettings(
-        chroma_db_impl="duckdb+parquet",
-        persist_directory=PERSIST_DIR,
-    )
-else:
-    CHROMA_SETTINGS = None
 
 # ================================
 # Styles
@@ -152,29 +127,19 @@ st.markdown(
 if not os.getenv("OPENAI_API_KEY"):
     st.warning("OPENAI_API_KEY is not set — set it via environment or a .env file.")
 
-_diag_panel(
-    "imports",
+# Diagnostics
+st.sidebar.markdown("### 🔧 Diagnostics")
+st.sidebar.write(
     {
-        "Chroma_resolved": bool(Chroma),
+        "python": sys.version,
+        "SQLITE_SHIM_OK": SQLITE_SHIM_OK,
+        "NP_SHIM_OK": NP_SHIM_OK,
+        "Chroma_imported": bool(Chroma),
         "chroma_source": chroma_source,
-        "ChromaSettings_resolved": chroma_settings_ok,
-    },
+        "chromadb_client_ok": CLIENT is not None,
+        "chromadb_client_error": repr(client_error) if client_error else None,
+    }
 )
-
-# Smoke test buttons
-if st.sidebar.button("Run import smoke test"):
-    try:
-        import chromadb  # noqa: F401
-        st.sidebar.success("chromadb import OK")
-    except Exception as e:
-        st.sidebar.error("chromadb import failed")
-        st.sidebar.code("".join(traceback.format_exception(e)))
-    try:
-        import langchain_chroma  # noqa: F401
-        st.sidebar.success("langchain_chroma import OK")
-    except Exception as e:
-        st.sidebar.warning("langchain_chroma import failed (fallback path may still work)")
-        st.sidebar.code("".join(traceback.format_exception(e)))
 
 # ================================
 # Ingestion helpers
@@ -208,7 +173,7 @@ def _extract_pdf_images(tmp_path: Path, name: str) -> Tuple[List[Document], List
                     pil_images.append(img)
                     ocr_text = ""
                     if "pytesseract" in sys.modules:
-                        import pytesseract  # local import
+                        import pytesseract
                         try:
                             ocr_text = pytesseract.image_to_string(img)
                         except Exception:
@@ -400,30 +365,22 @@ def compute_gene_frequencies(df: pd.DataFrame, total_samples: Optional[int] = No
     return grp, denom
 
 # ================================
-# Build / Load Index
+# Build / Load Index (NEW CLIENT API)
 # ================================
 def build_index(docs: List[Document]):
+    if CLIENT is None or Chroma is None:
+        raise RuntimeError("Chroma client or vectorstore is unavailable. Check diagnostics in the sidebar.")
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     splits = splitter.split_documents(docs)
     if len(splits) == 0:
         raise ValueError("No text extracted from the uploaded files.")
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    if CHROMA_SETTINGS is not None and Chroma is not None:
-        vectorstore = Chroma.from_documents(
-            splits,
-            embeddings,
-            persist_directory=PERSIST_DIR,
-            client_settings=CHROMA_SETTINGS,
-        )
-    elif Chroma is not None:
-        vectorstore = Chroma.from_documents(
-            splits,
-            embeddings,
-            persist_directory=PERSIST_DIR,
-        )
-    else:
-        # As a last resort, raise a helpful error
-        raise RuntimeError("Chroma could not be imported from either path. Check requirements and logs.")
+    vectorstore = Chroma.from_documents(
+        splits,
+        embeddings,
+        client=CLIENT,                 # NEW: pass PersistentClient
+        collection_name=COLLECTION,    # NEW: explicit collection name
+    )
     try:
         vectorstore.persist()
     except Exception:
@@ -431,20 +388,14 @@ def build_index(docs: List[Document]):
     return vectorstore, embeddings, splits
 
 def load_existing_index():
+    if CLIENT is None or Chroma is None:
+        raise RuntimeError("Chroma client or vectorstore is unavailable. Check diagnostics in the sidebar.")
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    if CHROMA_SETTINGS is not None and Chroma is not None:
-        vs = Chroma(
-            persist_directory=PERSIST_DIR,
-            embedding_function=embeddings,
-            client_settings=CHROMA_SETTINGS,
-        )
-    elif Chroma is not None:
-        vs = Chroma(
-            persist_directory=PERSIST_DIR,
-            embedding_function=embeddings,
-        )
-    else:
-        raise RuntimeError("Chroma could not be imported from either path. Check requirements and logs.")
+    vs = Chroma(
+        client=CLIENT,                 # NEW: pass PersistentClient
+        collection_name=COLLECTION,
+        embedding_function=embeddings,
+    )
     return vs, embeddings
 
 # ================================
@@ -511,7 +462,7 @@ if build_btn:
                     st.session_state.vectorstore = vs
                     st.session_state.all_docs = splits
                     st.session_state.all_figs = figs
-                    st.success(f"Indexed {len(splits)} chunks. Figures detected: {len(figs)}. Saved to {PERSIST_DIR}")
+                    st.success(f"Indexed {len(splits)} chunks. Figures detected: {len(figs)}.")
                 except Exception as e:
                     st.exception(e)
 
@@ -520,7 +471,7 @@ if load_btn:
         try:
             vs, _ = load_existing_index()
             st.session_state.vectorstore = vs
-            st.info(f"Loaded existing index from {PERSIST_DIR}.")
+            st.info("Loaded existing collection.")
         except Exception as e:
             st.exception(e)
 
@@ -645,23 +596,13 @@ with freq_tab:
             "patient", "subject", "case_id", "case", "participant_id"
         ]
 
-        def _standardize_cols_local(cols):
-            return [str(c).strip().lower().replace(" ", "_") for c in cols]
-
         def _norm(df: pd.DataFrame) -> pd.DataFrame:
             d = df.copy()
-            d.columns = _standardize_cols_local(d.columns)
+            d.columns = _standardize_cols(d.columns)
             return d
 
-        def _find_col_local(cols, candidates):
-            for c in cols:
-                for cand in candidates:
-                    if c == cand or c.endswith(f"_{cand}") or cand in c:
-                        return c
-            return None
-
         def _find_sample_col(cols):
-            return _find_col_local(cols, SAMPLE_COL_CANDS)
+            return _find_col(cols, SAMPLE_COL_CANDS)
 
         def compute_numerator_for_gene(gene_query: str):
             gene_upper = gene_query.strip().upper()
@@ -675,9 +616,9 @@ with freq_tab:
                 df = _norm(raw_df)
                 cols = list(df.columns)
 
-                hugo_col = _find_col_local(cols, ["hugo_symbol"])
-                site1_col = _find_col_local(cols, ["site1_hugo_symbol"])
-                site2_col = _find_col_local(cols, ["site2_hugo_symbol"])
+                hugo_col = _find_col(cols, ["hugo_symbol"])
+                site1_col = _find_col(cols, ["site1_hugo_symbol"])
+                site2_col = _find_col(cols, ["site2_hugo_symbol"])
                 sample_col = _find_sample_col(cols)
 
                 file_added = 0
