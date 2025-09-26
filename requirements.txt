@@ -12,13 +12,8 @@ numpy>=2.2,<2.4
 pandas==2.2.3
 pillow==10.4.0
 
-# LangChain (NumPy 2–compatible trio)
-langchain>=0.3.3
-langchain-openai>=0.2.2
-langchain-community>=0.3.3
-
-# Vector store: C
-chromadb==0.4.24
+langchain-chroma>=0.2.2
+chromadb>=0.5
 duckdb>=1.0.0
 
 
