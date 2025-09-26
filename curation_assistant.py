@@ -4,15 +4,16 @@ import os, sys
 # --- Force Chroma to DuckDB so it never touches system sqlite at import time
 os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
 os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
+os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "1")
 
-# --- Preload a modern sqlite (satisfies Chroma's import-time sqlite>=3.35 check)
+# --- Preload a modern sqlite (satisfies Chroma's sqlite>=3.35 import-time check)
 try:
     import pysqlite3  # requires pysqlite3-binary in requirements.txt
     sys.modules["sqlite3"] = sys.modules["pysqlite3"]
 except Exception:
     pass
 
-# --- NumPy 2.x shim for legacy deps that still reference np.float_
+# --- NumPy 2.x compatibility shim (some deps still reference np.float_)
 try:
     import numpy as np
     if not hasattr(np, "float_"):
@@ -35,6 +36,8 @@ try:
     from langchain_chroma import Chroma
 except ModuleNotFoundError:
     from langchain_community.vectorstores import Chroma  # legacy path
+
+from chromadb.config import Settings as ChromaSettings
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
