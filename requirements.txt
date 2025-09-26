@@ -1,5 +1,4 @@
 --prefer-binary
-# keep binary-only narrow to avoid brittle failures
 --only-binary=numpy,pillow,duckdb
 
 pip>=25.2
@@ -7,19 +6,22 @@ wheel>=0.44.0
 setuptools>=68
 
 # Core
-streamlit>=1.38,<2.0
-numpy>=2.2,<2.4
+streamlit==1.38.0
+numpy>=1.26.4,<2.0
 pandas==2.2.3
 pillow==10.4.0
 
-langchain-chroma>=0.2.2
+# RAG stack
+langchain>=0.2
+langchain-community>=0.2
+langchain-openai>=0.1
 chromadb>=0.5
-duckdb>=1.0.0
-
+langchain-chroma>=0.2.2
 
 # Docs / OCR
 pypdf==4.2.0
 python-docx==1.1.2
 mammoth==1.6.0
 pytesseract==0.3.10
+
 
