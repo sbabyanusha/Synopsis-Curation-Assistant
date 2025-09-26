@@ -1,14 +1,7 @@
---prefer-binary
---only-binary=numpy,pillow,duckdb
-
-pip>=25.2
-wheel>=0.44.0
-setuptools>=68
-
 # Core
 streamlit==1.38.0
-rich==13.9.4           # <- fix streamlit's constraint
-numpy>=1.26.4,<2.0
+rich==13.9.4
+numpy>=2.2        # Py3.13 has no NumPy <2.0 wheels; we’ll use the np.float_ shim in code
 pandas==2.2.3
 pillow==10.4.0
 
@@ -16,10 +9,10 @@ pillow==10.4.0
 langchain>=0.2
 langchain-community>=0.2
 langchain-openai>=0.1
-chromadb>=0.5
+chromadb>=0.5.4
 langchain-chroma>=0.2.2
 duckdb>=1.0.0
-pysqlite3-binary==0.5.2.post3   # <- optional but recommended on managed hosts
+pysqlite3-binary==0.5.2.post3   # provides modern sqlite so chroma’s check passes
 
 # Docs / OCR
 pypdf==4.2.0
