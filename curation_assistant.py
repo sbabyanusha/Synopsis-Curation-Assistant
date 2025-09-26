@@ -1,60 +1,84 @@
 from __future__ import annotations
-import os, sys
+import os, sys, traceback
 
-# Force Chroma to DuckDB and provide sqlite shim BEFORE chromadb imports
+# ------------------------------------------------------------------
+# Force Chroma -> DuckDB and inject a modern sqlite BEFORE imports
+# ------------------------------------------------------------------
 os.environ.setdefault("CHROMA_DB_IMPL", "duckdb+parquet")
 os.environ.setdefault("CHROMADB_DEFAULT_DATABASE", "duckdb+parquet")
 os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "1")
 
+# Provide modern sqlite for chroma's import-time check
 try:
-    import pysqlite3
+    import pysqlite3  # requires pysqlite3-binary==0.5.4 in requirements
     sys.modules["sqlite3"] = sys.modules["pysqlite3"]
+    SQLITE_SHIM_OK = True
 except Exception:
-    pass
+    SQLITE_SHIM_OK = False
 
-# NumPy 2.x shim (legacy deps may reference np.float_)
+# ------------------------------------------------------------------
+# NumPy 2.x shim (legacy deps may still reference np.float_)
+# ------------------------------------------------------------------
 try:
     import numpy as np
     if not hasattr(np, "float_"):
-        np.float_ = np.float64
+        np.float_ = np.float64  # noqa: NPY201
+    NP_SHIM_OK = True
 except Exception:
-    pass
+    NP_SHIM_OK = False
 
 import streamlit as st
 
+# ==============================================================
+# DIAGNOSTIC PANEL — shows what actually imported on Cloud
+# ==============================================================
+
+def _diag_panel(stage: str, extras: dict | None = None):
+    st.sidebar.markdown("### 🔧 Diagnostics")
+    st.sidebar.write(
+        {
+            "stage": stage,
+            "python": sys.version,
+            "SQLITE_SHIM_OK": SQLITE_SHIM_OK,
+            "NP_SHIM_OK": NP_SHIM_OK,
+            **(extras or {}),
+        }
+    )
+
+# Try both Chroma import paths with robust fallbacks
+Chroma = None
+chroma_source = None
 try:
-    from langchain_chroma import Chroma
-except ModuleNotFoundError:
-    from langchain_community.vectorstores import Chroma
+    from langchain_chroma import Chroma as _Chroma
+    Chroma = _Chroma
+    chroma_source = "langchain_chroma"
+except Exception as e1:
+    # show error but continue to fallback
+    st.sidebar.write({"langchain_chroma_import_error": repr(e1)})
+    try:
+        from langchain_community.vectorstores import Chroma as _Chroma
+        Chroma = _Chroma
+        chroma_source = "langchain_community"
+    except Exception as e2:
+        st.sidebar.write({"community_chroma_import_error": repr(e2)})
 
-from chromadb.config import Settings as ChromaSettings
-
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-
-# Readers
-from langchain_community.document_loaders import PyPDFLoader
-import docx
-import mammoth
-
-# Explicit Chroma backend config (also forced via env above)
-from chromadb.config import Settings as ChromaSettings
-
-# Optional deps
+# Import Chroma settings (guarded)
+ChromaSettings = None
+chroma_settings_ok = False
 try:
-    import pytesseract
-    _HAS_TESS = True
-except Exception:
-    _HAS_TESS = False
+    from chromadb.config import Settings as ChromaSettings  # type: ignore
+    chroma_settings_ok = True
+except Exception as e:
+    st.sidebar.write({"chromadb_settings_import_error": repr(e)})
 
-try:
-    import textract
-    _HAS_TEXTRACT = True
-except Exception:
-    _HAS_TEXTRACT = False
+_diag_panel(
+    "imports",
+    {
+        "Chroma_resolved": bool(Chroma),
+        "chroma_source": chroma_source,
+        "ChromaSettings_resolved": chroma_settings_ok,
+    },
+)
 
 # ================================
 # Streamlit page config
