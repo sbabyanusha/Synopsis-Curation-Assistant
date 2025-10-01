@@ -143,7 +143,7 @@ st.markdown(
   <h2 style="margin:0">🧬 Curation Assistant</h2>
   <div style="margin-top:6px">
     Answers grounded strictly in your uploaded files.
-    #<span class="tag">Chroma</span><span class="tag">MMR</span><span class="tag">OCR</span><span class="tag">Frequencies</span>
+    <span class="tag">Chroma</span><span class="tag">MMR</span><span class="tag">OCR</span><span class="tag">Frequencies</span>
   </div>
 </div>
 """,
