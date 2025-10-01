@@ -1,18 +1,28 @@
+"""
+Synopsis Tool
+
+- Summarize & Q&A strictly from uploaded files (.pdf, .txt, .doc/.docx, .xlsx)
+- Extract figures/images from PDFs, and add to the RAG index
+- Upload cBio-style tables (mutations/CNA/SV/clinical) and query gene frequencies
+- Query multiple genes (e.g., TP53, EGFR, KRAS) and compute % = (# profiled samples for gene / total profiled samples) * 100
+
+Quickstart
+----------
+1) Python 3.9+  (3.10+ recommended)
+2) pip install -r requirements.txt
+3) export OPENAI_API_KEY=sk-...
+4) streamlit run new_app.py
+"""
+
 from __future__ import annotations
 """
-Curation Assistant (Streamlit)
+Synopsis Tool
 -----------------------------
-- Ingest PDFs/DOCX/CSV/XLSX into a lightweight local RAG index
-- Summarize and Q&A strictly from uploaded documents
-- Extract figures from PDFs and optionally OCR them
-- Compute simple per-gene frequencies from cBio-style tables
+- Summarize & Q&A strictly from uploaded files (.pdf, .txt, .doc/.docx, .xlsx)
+- Extract figures/images from PDFs, and add to the RAG index
+- Upload cBio-style tables (mutations/CNA/SV/clinical) and query gene frequencies
+- Query multiple genes (e.g., TP53, EGFR, KRAS) and compute % = (# profiled samples for gene / total profiled samples) * 100
 
-Resilient storage:
-- Prefer Chroma (new Client API) for persistence when available
-- Fall back to FAISS (in-memory) automatically if Chroma/sqlite isn't usable
-
-This file is structured in small, clearly commented sections. Search for
-"SECTION:" markers to navigate.
 """
 
 # =============================================================================
@@ -95,7 +105,7 @@ import mammoth  # .docx fallback
 # =============================================================================
 # SECTION: Streamlit setup & constants
 # =============================================================================
-st.set_page_config(page_title="🧬 Curation Assistant", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="🧬 Curation Assistant", layout="wide")
 
 # Tuning knobs
 CHUNK_SIZE = 1200
@@ -149,16 +159,16 @@ if not st.session_state.get("OPENAI_KEY_WARNED") and not st.secrets.get("OPENAI_
 # =============================================================================
 # SECTION: Diagnostics (left sidebar)
 # =============================================================================
-st.sidebar.markdown("### 🔧 Diagnostics")
-st.sidebar.write({
-    "python": sys.version,
-    "SQLITE_SHIM_OK": SQLITE_SHIM_OK,
-    "NP_SHIM_OK": NP_SHIM_OK,
-    "Chroma_imported": bool(Chroma),
-    "chroma_source": chroma_source,
-    "chromadb_client_ok": CLIENT is not None,
-    "chromadb_client_error": repr(client_error) if client_error else None,
-})
+#st.sidebar.markdown("### 🔧 Diagnostics")
+#st.sidebar.write({
+    #"python": sys.version,
+    #"SQLITE_SHIM_OK": SQLITE_SHIM_OK,
+    #"NP_SHIM_OK": NP_SHIM_OK,
+    #"Chroma_imported": bool(Chroma),
+    #"chroma_source": chroma_source,
+    #"chromadb_client_ok": CLIENT is not None,
+    #"chromadb_client_error": repr(client_error) if client_error else None,
+#})
 
 # =============================================================================
 # SECTION: File readers & utilities
